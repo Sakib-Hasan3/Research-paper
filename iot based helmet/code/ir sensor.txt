@@ -1,0 +1,89 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);  // use 0x3F if 0x27 doesn't work
+
+// ---- Pins ----
+const int helmetPin = 4;   // IR helmet sensor OUT
+const int relayPin  = 7;   // Relay (NO wiring: LOW=Motor ON, HIGH=Motor OFF)
+const int buzzerPin = 8;   // optional beep
+const int ledPin    = 13;  // onboard LED
+
+// ---- Config ----
+// If your IR module outputs LOW when helmet PRESENT, keep false.
+// If it outputs HIGH when helmet PRESENT, set to true.
+const bool HELMET_ACTIVE_HIGH = false;
+
+// TEST MODE: keep Motor ON when NO helmet (as you requested for testing)
+// Set false later for real safety (NO helmet => Motor OFF).
+const bool TEST_MOTOR_ON_WHEN_NO_HELMET = true;
+
+// ---- Helpers ----
+void motorOn(bool on) {             // NO wiring: LOW=ON, HIGH=OFF
+  digitalWrite(relayPin, on ? LOW : HIGH);
+}
+
+void lcdPrint16(uint8_t row, const String &msg) {
+  lcd.setCursor(0, row);
+  String pad = msg + "                ";
+  lcd.print(pad.substring(0, 16));
+}
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(helmetPin, INPUT_PULLUP); // robust for many IR modules
+  pinMode(relayPin, OUTPUT);
+  pinMode(buzzerPin, OUTPUT);
+  pinMode(ledPin, OUTPUT);
+
+  lcd.begin(16, 2);
+  lcd.backlight();
+  lcdPrint16(0, "Helmet IR Test");
+  lcdPrint16(1, "Init...");
+  delay(800);
+  lcdPrint16(0, "");
+  lcdPrint16(1, "");
+
+  // Start motor OFF (safe) until first read
+  motorOn(false);
+}
+
+void loop() {
+  int raw = digitalRead(helmetPin);
+  // Interpret “helmet present”
+  bool helmetOn = HELMET_ACTIVE_HIGH ? (raw == HIGH) : (raw == LOW);
+
+  // ---- Requested TEST behavior ----
+  if (!helmetOn && TEST_MOTOR_ON_WHEN_NO_HELMET) {
+    // NO helmet -> Motor ON (TEST), show warning
+    motorOn(true);
+    digitalWrite(ledPin, HIGH);
+    // short chirp every ~1s to notice
+    bool beep = ((millis() / 1000) % 2) == 0;
+    digitalWrite(buzzerPin, beep ? HIGH : LOW);
+
+    lcdPrint16(0, "Wear Helmet!");
+    lcdPrint16(1, "Motor ON (TEST)");
+  } else {
+    // Helmet present OR safety mode enabled
+    motorOn(false);
+    digitalWrite(ledPin, LOW);
+    digitalWrite(buzzerPin, LOW);
+
+    if (helmetOn) {
+      lcdPrint16(0, "Helmet OK");
+      lcdPrint16(1, "Motor OFF");
+    } else {
+      // (if TEST flag = false) this shows safety lock message
+      lcdPrint16(0, "Wear Helmet!");
+      lcdPrint16(1, "Motor OFF (SAFE)");
+    }
+  }
+
+  // Debug to Serial
+  Serial.print("helmetRaw="); Serial.print(raw);
+  Serial.print("  helmetOn="); Serial.println(helmetOn ? 1 : 0);
+
+  delay(150);
+}

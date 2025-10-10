@@ -1,0 +1,15 @@
+void setup() {
+  Serial.begin(9600);
+}
+
+void loop() {
+  int xValue = analogRead(A0);  // X-axis
+  int yValue = analogRead(A1);  // Y-axis
+  int zValue = analogRead(A2);  // Z-axis
+
+  Serial.print("X: "); Serial.print(xValue);
+  Serial.print(" | Y: "); Serial.print(yValue);
+  Serial.print(" | Z: "); Serial.println(zValue);
+
+  delay(200);
+}

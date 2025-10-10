@@ -1,0 +1,17 @@
+const int vibPin = 12;  // Connect DO pin of the sensor here
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(vibPin, INPUT);
+  Serial.println("Vibration Sensor Test Starting...");
+}
+
+void loop() {
+  int state = digitalRead(vibPin);
+  if (state == HIGH) {
+    Serial.println("⚠️ Vibration Detected!");
+  } else {
+    Serial.println("No Vibration");
+  }
+  delay(300);
+}

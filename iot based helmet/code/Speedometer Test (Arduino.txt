@@ -1,0 +1,70 @@
+// ======== Speedometer Test (Arduino Uno) ========
+// Hall/ reed sensor D0 -> Arduino D3 (INT1). Counts pulses and computes speed.
+// If you must use D2 instead, set SPEED_PIN = 2.
+
+const byte SPEED_PIN = 3;                // use D3 (INT1). D2 (INT0) also works
+const float WHEEL_CIRC_MM = 2100.0;      // set your wheel circumference in mm
+const uint8_t PULSES_PER_REV = 1;        // number of magnets per wheel revolution
+
+const unsigned long MIN_PULSE_INTERVAL_US = 5000UL;  // debounce/noise filter
+const unsigned long SPEED_TIMEOUT_MS      = 1500UL;  // no pulse -> speed = 0
+
+volatile unsigned long lastPulseMicros = 0;
+volatile unsigned long pulseIntervalMicros = 0;
+volatile bool newPulse = false;
+
+void countPulse() {                      // ISR (no IRAM_ATTR on Uno)
+  unsigned long now = micros();
+  unsigned long dt = now - lastPulseMicros;
+  if (dt >= MIN_PULSE_INTERVAL_US) {
+    pulseIntervalMicros = dt;
+    lastPulseMicros = now;
+    newPulse = true;
+  }
+}
+
+float computeSpeedKmh(unsigned long latestIntervalUs) {
+  if (latestIntervalUs == 0) return 0.0;
+  const float dist_per_pulse_m = (WHEEL_CIRC_MM / 1000.0) / PULSES_PER_REV; // meters
+  float interval_s = latestIntervalUs / 1e6;
+  if (interval_s <= 0.0) return 0.0;
+  float speed_mps = dist_per_pulse_m / interval_s;
+  return speed_mps * 3.6f;              // km/h
+}
+
+void setup() {
+  Serial.begin(9600);
+  delay(1200);
+  Serial.println("Speedometer Test (D3/INT1)");
+
+  pinMode(SPEED_PIN, INPUT_PULLUP);     // most hall/reed sensors are open collector
+  attachInterrupt(digitalPinToInterrupt(SPEED_PIN), countPulse, FALLING);
+}
+
+void loop() {
+  static unsigned long lastDisplayMs = 0;
+  static unsigned long lastPulseSeenMs = 0;
+  static unsigned long cachedIntervalUs = 0;
+
+  // copy new interval when ISR flags it
+  if (newPulse) {
+    noInterrupts();
+    cachedIntervalUs = pulseIntervalMicros;
+    newPulse = false;
+    interrupts();
+    lastPulseSeenMs = millis();
+  }
+
+  bool timedOut = (millis() - lastPulseSeenMs > SPEED_TIMEOUT_MS);
+  float kmh = timedOut ? 0.0f : computeSpeedKmh(cachedIntervalUs);
+  float mph = kmh * 0.621371f;
+
+  if (millis() - lastDisplayMs > 200) {
+    lastDisplayMs = millis();
+    Serial.print("Speed: ");
+    Serial.print(kmh, 2);
+    Serial.print(" km/h  (");
+    Serial.print(mph, 2);
+    Serial.println(" mph)");
+  }
+}

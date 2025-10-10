@@ -1,0 +1,59 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// ---- Pins ----
+const int mqAnalog = A1;   // Analog input from MQ-3
+const int relayPin = 7;    // Relay controlling motor
+const int buzzerPin = 8;
+
+int alcoholValue = 0;
+int threshold = 300;   // Adjust after calibration
+
+void motorOn(bool on) {
+  digitalWrite(relayPin, on ? LOW : HIGH); // NO relay: LOW=ON
+}
+
+void lcdPrint16(uint8_t row, const String &msg) {
+  lcd.setCursor(0, row);
+  String pad = msg + "                ";
+  lcd.print(pad.substring(0, 16));
+}
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(relayPin, OUTPUT);
+  pinMode(buzzerPin, OUTPUT);
+
+  lcd.begin(16,2);
+  lcd.backlight();
+  lcdPrint16(0, "Alcohol Sensor");
+  lcdPrint16(1, "Warming up...");
+  delay(2000);
+
+  motorOn(false); // Start motor OFF
+}
+
+void loop() {
+  alcoholValue = analogRead(mqAnalog);
+
+  Serial.print("Alcohol Value: ");
+  Serial.println(alcoholValue);
+
+  if (alcoholValue > threshold) {
+    // Alcohol detected -> STOP motor
+    motorOn(false);
+    digitalWrite(buzzerPin, HIGH);
+    lcdPrint16(0, "ALCOHOL DETECTED");
+    lcdPrint16(1, "Motor OFF");
+  } else {
+    // Safe -> Motor ON
+    motorOn(true);
+    digitalWrite(buzzerPin, LOW);
+    lcdPrint16(0, "Safe to Ride");
+    lcdPrint16(1, "Motor ON");
+  }
+
+  delay(500);
+}

@@ -1,0 +1,291 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <SoftwareSerial.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+SoftwareSerial gsm(2, 3);   // SIM800: D2=RX, D3=TX
+
+// ---------- Pins ----------
+const int mq3Pin      = A0;   // Alcohol
+const int rainAnalog  = A1;   // Rain
+const int relayPin    = 7;    // Relay (NO: LOW=ON, HIGH=OFF)
+const int buzzerPin   = 8;
+const int ledPin      = 13;   // moved from D9 to free PWM
+const int helmetPin   = 4;
+const int trigPin     = 5;    // Ultrasonic
+const int echoPin     = 6;
+const int vibPin      = 12;   // Vibration
+const int resetPin    = 11;   // Reset -> GND (INPUT_PULLUP)
+const int eyePin      = 10;   // Eye blink DO
+
+// OPTIONAL PWM motor control (for soft stop)
+const int motorPWMPin = 9;    // <-- connect to motor driver/MOSFET PWM/EN
+
+// ---------- Settings ----------
+const bool HELMET_ACTIVE_HIGH = false;
+const int  thresholdAlcohol    = 700;
+const int  OBSTACLE_CM         = 30;
+const int  MIN_VALID_CM        = 5;
+int        rainAnalogThresh    = 600;
+
+// Accident detection (burst)
+const unsigned long VIB_WINDOW_MS = 1000;
+const int           VIB_HITS      = 3;
+
+// Eye blink detection
+const bool   EYE_ACTIVE_LOW      = true;    // LOW = eye closed (most modules)
+const unsigned long BLINK_MIN_MS = 60;      // ignore micro-flicker
+const unsigned long BLINK_MAX_MS = 1000;    // >1s treated as long close, not a blink
+const unsigned long BLINK_WINDOW_MS = 30000;// 30s window
+const int           BLINK_LIMIT   = 10;     // >=10 blinks -> soft stop
+
+// ---------- State ----------
+bool smsSentDrunk = false;
+bool emergencyLatched = false;
+
+// Eye blink state
+bool eyeWasClosed = false;
+unsigned long eyeClosedAt = 0;
+unsigned long blinkWinStart = 0;
+int blinkCount = 0;
+
+// ---------- Helpers ----------
+void lcdPrint16(uint8_t row, const String &msg){
+  lcd.setCursor(0,row);
+  String pad = msg + "                ";
+  lcd.print(pad.substring(0,16));
+}
+
+void motorOn(bool on){ // Relay NO: LOW=ON, HIGH=OFF
+  digitalWrite(relayPin, on ? LOW : HIGH);
+}
+
+void alarmOn(bool on){
+  digitalWrite(buzzerPin, on ? HIGH : LOW);
+  digitalWrite(ledPin,    on ? HIGH : LOW);
+}
+
+void setMotorPWM(uint8_t duty){  // 0..255 (requires motor driver on motorPWMPin)
+  analogWrite(motorPWMPin, duty);
+}
+
+void relayKill(bool kill){
+  digitalWrite(relayPin, kill ? HIGH : LOW);
+}
+
+// Soft stop: ramp PWM down over ramp_ms, then open relay
+void softStop(unsigned long ramp_ms){
+  // If you don't have a PWM driver connected, this will just cut after a delay.
+  pinMode(motorPWMPin, OUTPUT);
+  const int steps = 25;
+  for(int i=0;i<=steps;i++){
+    int d = map(i,0,steps,255,0);
+    setMotorPWM(d);
+    delay(ramp_ms/steps);
+  }
+  delay(400);
+  relayKill(true); // final safety cut
+}
+
+int readUltrasonicCM(){
+  digitalWrite(trigPin, LOW);  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH); delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  unsigned long dur = pulseIn(echoPin, HIGH, 30000UL);
+  if(dur==0) return 999;
+  int cm = (int)(dur/58.0);
+  if(cm<MIN_VALID_CM) return 999;
+  return cm;
+}
+
+int readUltrasonicMedianCM(){
+  int v[5];
+  for(int i=0;i<5;i++){ v[i]=readUltrasonicCM(); delay(20); }
+  for(int i=0;i<5;i++) for(int j=i+1;j<5;j++) if(v[j]<v[i]){int t=v[i]; v[i]=v[j]; v[j]=t;}
+  if(v[2]==999) return 999;
+  return v[2];
+}
+
+void sendSMS_Drunk(){
+  gsm.println("AT"); delay(500);
+  gsm.println("AT+CMGF=1"); delay(1000);
+  gsm.println("AT+CMGS=\"+8801869793139\""); delay(1000);
+  gsm.print("ALERT! Alcohol detected. Vehicle soft-stopped. [Bike No: DHA-1234]");
+  delay(300); gsm.write(26); delay(5000);
+}
+
+void sendSMS_Emergency(){
+  gsm.println("AT"); delay(500);
+  gsm.println("AT+CMGF=1"); delay(1000);
+  gsm.println("AT+CMGS=\"+8801869793139\""); delay(1000);
+  gsm.print("EMERGENCY! Possible accident detected. Soft-stopped. Need assistance. [Bike No: DHA-1234]");
+  delay(300); gsm.write(26); delay(5000);
+}
+
+// ---------- Setup ----------
+void setup(){
+  Serial.begin(9600);
+  gsm.begin(9600);
+
+  pinMode(relayPin, OUTPUT);
+  pinMode(buzzerPin, OUTPUT);
+  pinMode(ledPin, OUTPUT);
+  pinMode(helmetPin, INPUT_PULLUP);
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  pinMode(vibPin, INPUT);
+  pinMode(resetPin, INPUT_PULLUP);
+  pinMode(eyePin, INPUT);
+  pinMode(motorPWMPin, OUTPUT);  // PWM output (if driver installed)
+
+  lcd.begin(16,2);
+  lcd.backlight();
+  lcdPrint16(0,"Safety Monitor");
+  lcdPrint16(1,"Init...");
+  delay(1200);
+  lcdPrint16(0,"");
+  lcdPrint16(1,"");
+
+  // Safe start
+  motorOn(false);
+  alarmOn(false);
+  relayKill(true);
+  setMotorPWM(0);
+
+  blinkWinStart = millis();
+}
+
+// ---------- Loop ----------
+void loop(){
+  // Reset latch
+  if(digitalRead(resetPin)==LOW){
+    emergencyLatched=false;
+    alarmOn(false);
+    blinkCount = 0;
+    blinkWinStart = millis();
+    lcdPrint16(0,"Reset OK");
+    lcdPrint16(1,"Ready");
+    delay(400);
+  }
+
+  // Accident burst detect
+  static unsigned long winStart=0; static int hitCount=0;
+  if(digitalRead(vibPin)==HIGH){
+    if(millis()-winStart>VIB_WINDOW_MS){ winStart=millis(); hitCount=0; }
+    hitCount++;
+  }
+  if((millis()-winStart<=VIB_WINDOW_MS) && hitCount>=VIB_HITS){
+    emergencyLatched=true;
+  }
+  if(emergencyLatched){
+    lcdPrint16(0,"Accident!");
+    lcdPrint16(1,"Soft stopping");
+    softStop(3000);
+    alarmOn(true);
+    static bool sent=false; if(!sent){ /*sendSMS_Emergency();*/ sent=true; }
+    delay(300);
+    return;
+  }
+
+  // 1) Helmet gate
+  int rawHelmet=digitalRead(helmetPin);
+  bool helmetDetected = HELMET_ACTIVE_HIGH ? (rawHelmet==HIGH) : (rawHelmet==LOW);
+  if(!helmetDetected){
+    motorOn(false);
+    relayKill(true);
+    setMotorPWM(0);
+    bool blink=((millis()/300)%2)==0;
+    digitalWrite(buzzerPin, blink?HIGH:LOW);
+    digitalWrite(ledPin,    blink?HIGH:LOW);
+    lcdPrint16(0,"Wear Helmet!");
+    lcdPrint16(1,"Motor LOCKED");
+    delay(150);
+    return;
+  }
+  alarmOn(false);
+
+  // 2) Alcohol
+  int alcoholLevel=analogRead(mq3Pin);
+  if(alcoholLevel>thresholdAlcohol){
+    lcdPrint16(0,"Alcohol High");
+    lcdPrint16(1,"Soft stopping");
+    softStop(3000);
+    alarmOn(true);
+    if(!smsSentDrunk){ /*sendSMS_Drunk();*/ smsSentDrunk=true; }
+    delay(250);
+    return;
+  } else smsSentDrunk=false;
+
+  // Allow motor (relay closed + PWM full)
+  relayKill(false);
+  setMotorPWM(255);
+  motorOn(true);
+
+  // ---------- Eye blink counting (10 in 30s -> soft stop) ----------
+  int rawEye = digitalRead(eyePin);
+  bool eyeClosedNow = EYE_ACTIVE_LOW ? (rawEye==LOW) : (rawEye==HIGH);
+
+  // Window maintenance
+  if(millis() - blinkWinStart > BLINK_WINDOW_MS){
+    blinkWinStart = millis();
+    blinkCount = 0;
+  }
+
+  // Edge detection: count on CLOSED->OPEN if duration is a valid blink
+  if(eyeClosedNow && !eyeWasClosed){
+    eyeWasClosed = true;
+    eyeClosedAt  = millis();
+  }
+  if(!eyeClosedNow && eyeWasClosed){
+    eyeWasClosed = false;
+    unsigned long dur = millis() - eyeClosedAt;
+    if(dur >= BLINK_MIN_MS && dur <= BLINK_MAX_MS){
+      blinkCount++;
+    }
+  }
+
+  // Trigger soft stop if threshold reached
+  if(blinkCount >= BLINK_LIMIT){
+    lcdPrint16(0,"Blink >=10/30s");
+    lcdPrint16(1,"Soft stopping");
+    softStop(3000);
+    // optional: SMS to caretaker about drowsiness
+    // gsm ... (add if needed)
+    // reset window so it won't immediately retrigger
+    blinkCount = 0;
+    blinkWinStart = millis();
+    delay(500);
+    return;
+  }
+
+  // 3) Rain advisory
+  int rainA = analogRead(rainAnalog);
+  bool isRainy = (rainA < rainAnalogThresh);
+
+  // 4) Obstacle warn
+  int distanceCM = readUltrasonicMedianCM();
+  bool obstacleClose = (distanceCM!=999 && distanceCM<=OBSTACLE_CM);
+
+  // UI
+  lcdPrint16(0, "A:"+String(alcoholLevel)+
+                " D:"+(distanceCM==999?"--":String(distanceCM))+
+                " R:"+(isRainy?"Y":"N")+
+                " B:"+String(blinkCount));
+
+  if(obstacleClose){
+    bool beep=((millis()/200)%2)==0;
+    digitalWrite(buzzerPin, beep?HIGH:LOW);
+    digitalWrite(ledPin,    beep?HIGH:LOW);
+    lcdPrint16(1,"Obstacle: Slow  ");
+  } else if(isRainy){
+    digitalWrite(buzzerPin, LOW);
+    digitalWrite(ledPin, LOW);
+    lcdPrint16(1,"Rainy: Slow Bike");
+  } else {
+    digitalWrite(buzzerPin, LOW);
+    digitalWrite(ledPin, LOW);
+    lcdPrint16(1,"Dry: Motor ON   ");
+  }
+
+  delay(80);
+}

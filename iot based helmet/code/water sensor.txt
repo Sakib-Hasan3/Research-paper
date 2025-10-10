@@ -1,0 +1,18 @@
+const int rainPin = A1;  // Digital signal pin from rain sensor
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(rainPin, INPUT);
+}
+
+void loop() {
+  int rainStatus = digitalRead(rainPin);
+
+  if (rainStatus == LOW) {
+    Serial.println("Rain detected (LOW)");
+  } else {
+    Serial.println("Dry (HIGH)");
+  }
+
+  delay(500);
+}
